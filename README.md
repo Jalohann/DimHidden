@@ -67,7 +67,8 @@ The Dock doesn't report where it draws the artwork, dot, and badge inside each t
 
 ## Limitations
 
-- Tested on macOS 27.2 in Dark Mode with the default icon style. A future macOS update could move things by a point or two.
+- Tested on macOS 27.2 with the default icon style, in Dark Mode and in Light Mode over a dark wallpaper. A future macOS update could move things by a point or two.
+- In Light Mode the veil's color comes from the wallpaper picture. If the picture can't be read (for example, some moving wallpapers), the veil falls back to a neutral gray.
 - Not tested with Dock auto-hide or with more than one display.
 - If you hide an app in another Space, its veil can show up there too.
 

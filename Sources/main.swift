@@ -123,7 +123,8 @@ enum DockEdge: String {
 ///   and dot are drawn 2.5pt closer to the screen edge than the tile suggests.
 /// - The dot (~4pt) sits 5.75pt from the screen-edge side of the tile (6.25pt on side Docks).
 /// - The badge does not scale exactly with the artwork (A): its diameter is 0.474A + 0.67pt, and its center is
-///   0.3585A + 0.68pt right of and 0.385A above the artwork's center. It widens to the left for longer labels.
+///   0.3585A + 0.68pt right of and 0.385A above the artwork's center. Two-character labels still fit the circle
+///   ("22" and "26" measured 13pt wide, the same as "1"); longer labels widen it to the left.
 struct VeilGeometry {
     let icon: CGRect
     let dot: CGRect
@@ -151,7 +152,7 @@ struct VeilGeometry {
         if let label = label {
             let d = art * 0.474 + 0.67
             let badgeCenter = CGPoint(x: center.x + art * 0.3585 + 0.68, y: center.y - art * 0.385)
-            let width = d * (0.55 + 0.45 * CGFloat(min(max(label.count, 1), 5)))
+            let width = d * (0.55 + 0.45 * CGFloat(min(max(label.count - 1, 1), 4)))
             // Slightly smaller than the badge: a faintly dimmed badge rim is less visible than a bright ring of
             // undimmed icon around it.
             let inset = CGFloat(defaults.object(forKey: "badgeInset") as? Double ?? 0.5)
@@ -160,6 +161,118 @@ struct VeilGeometry {
         } else {
             badge = nil
         }
+    }
+}
+
+// MARK: - Wallpaper
+
+/// In Light Mode the Dock's glass shows the wallpaper behind it, lightened. Measured on macOS 27.2 over a dark blue
+/// wallpaper, the glass between icons matched the wallpaper under it blended with about 12% white (within ~10/255 per
+/// channel; blue came out a little higher). A light-mode veil therefore takes that color; a fixed light gray showed
+/// up as pale squares and gray discs on dark wallpapers.
+@MainActor
+final class Wallpaper {
+    private struct Snapshot {
+        let url: URL
+        let options: NSDictionary
+        let frame: CGRect  // the screen, in the Accessibility API's top-left coordinates
+        let width: Int
+        let height: Int
+        let pixels: [UInt8]  // sRGB, RGBA, top row first
+    }
+
+    /// Pixels per point. The veil averages the wallpaper under a whole icon, so a coarse copy is enough.
+    private let scale: CGFloat = 0.25
+    private let glassWhite: CGFloat = 0.12
+    private var snapshots: [Snapshot] = []
+
+    /// Re-renders the wallpaper of any screen whose picture, placement, or frame changed.
+    func reload() {
+        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+        snapshots = NSScreen.screens.compactMap { screen in
+            guard let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
+            let options = (NSWorkspace.shared.desktopImageOptions(for: screen) ?? [:]) as NSDictionary
+            let frame = CGRect(x: screen.frame.minX, y: primaryHeight - screen.frame.maxY,
+                               width: screen.frame.width, height: screen.frame.height)
+            if let old = snapshots.first(where: { $0.url == url && $0.options == options && $0.frame == frame }) {
+                return old
+            }
+            return render(url: url, options: options, frame: frame, backingScale: screen.backingScaleFactor)
+        }
+    }
+
+    /// The Dock glass color over `rect`, in top-left screen coordinates.
+    func glassColor(under rect: CGRect) -> NSColor? {
+        guard let s = snapshots.first(where: { $0.frame.contains(CGPoint(x: rect.midX, y: rect.midY)) }) else { return nil }
+        func clamp(_ v: CGFloat, _ upper: Int) -> Int { min(max(Int(v), 0), upper) }
+        let x0 = clamp((rect.minX - s.frame.minX) * scale, s.width - 1)
+        let x1 = clamp(((rect.maxX - s.frame.minX) * scale).rounded(.up), s.width)
+        let y0 = clamp((rect.minY - s.frame.minY) * scale, s.height - 1)
+        let y1 = clamp(((rect.maxY - s.frame.minY) * scale).rounded(.up), s.height)
+        var sum = (0, 0, 0), count = 0
+        for y in y0..<max(y1, y0 + 1) {
+            for x in x0..<max(x1, x0 + 1) {
+                let i = (y * s.width + x) * 4
+                sum.0 += Int(s.pixels[i]); sum.1 += Int(s.pixels[i + 1]); sum.2 += Int(s.pixels[i + 2])
+                count += 1
+            }
+        }
+        let n = CGFloat(count * 255)
+        func glass(_ channel: Int) -> CGFloat { CGFloat(channel) / n * (1 - glassWhite) + glassWhite }
+        return NSColor(srgbRed: glass(sum.0), green: glass(sum.1), blue: glass(sum.2), alpha: 1)
+    }
+
+    private func render(url: URL, options: NSDictionary, frame: CGRect, backingScale: CGFloat) -> Snapshot? {
+        let width = max(Int(frame.width * scale), 1), height = max(Int(frame.height * scale), 1)
+        // Decoding a full-size wallpaper took 21 s and 550 MB on a 6016 px HEIC; a decoder-side thumbnail takes
+        // about 0.15 s. Twice the canvas size leaves room for a wallpaper that is cropped to fill the screen.
+        let thumbnailOptions: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                 kCGImageSourceCreateThumbnailWithTransform: true,
+                                                 kCGImageSourceThumbnailMaxPixelSize: 2 * max(width, height)]
+        // Some moving wallpapers have no still image to read; their veils keep the fixed color.
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, CGImageSourceGetPrimaryImageIndex(source),
+                                                              thumbnailOptions as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, CGImageSourceGetPrimaryImageIndex(source), nil)
+                as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? CGFloat, pixelWidth > 0, pixelHeight > 0,
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let fullSize = CGSize(width: pixelWidth / backingScale, height: pixelHeight / backingScale)
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let cg = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                     bytesPerRow: width * 4, space: space,
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            let canvas = CGSize(width: width, height: height)
+            cg.setFillColor((options[NSWorkspace.DesktopImageOptionKey.fillColor] as? NSColor ?? .black).cgColor)
+            cg.fill(CGRect(origin: .zero, size: canvas))
+            cg.interpolationQuality = .medium
+            cg.draw(image, in: placement(of: fullSize, in: canvas, options: options))
+            return true
+        }
+        guard drawn else { return nil }
+        return Snapshot(url: url, options: options, frame: frame, width: width, height: height, pixels: pixels)
+    }
+
+    /// Where the Desktop draws the picture, following the screen's "Fill Screen", "Fit to Screen", "Stretch to Fill
+    /// Screen", and "Center" choices.
+    private func placement(of image: CGSize, in canvas: CGSize, options: NSDictionary) -> CGRect {
+        let raw = (options[NSWorkspace.DesktopImageOptionKey.imageScaling] as? NSNumber)?.uintValue
+        let scaling = raw.flatMap(NSImageScaling.init(rawValue:)) ?? .scaleProportionallyUpOrDown
+        let clips = (options[NSWorkspace.DesktopImageOptionKey.allowClipping] as? NSNumber)?.boolValue ?? true
+        let fit = min(canvas.width / image.width, canvas.height / image.height)
+        let fill = max(canvas.width / image.width, canvas.height / image.height)
+        let factor: CGFloat
+        switch scaling {
+        case .scaleAxesIndependently: return CGRect(origin: .zero, size: canvas)
+        case .scaleNone: factor = scale
+        case .scaleProportionallyDown: factor = min(fit, scale)
+        default: factor = clips ? fill : fit
+        }
+        let size = CGSize(width: image.width * factor, height: image.height * factor)
+        return CGRect(x: (canvas.width - size.width) / 2, y: (canvas.height - size.height) / 2,
+                      width: size.width, height: size.height)
     }
 }
 
@@ -255,6 +368,8 @@ final class Controller: NSObject, NSMenuDelegate {
     private var edge = DockEdge.bottom
     private var iconColor = NSColor.clear
     private var dotColor = NSColor.clear
+    private var lightMode = false
+    private let wallpaper = Wallpaper()
 
     private var enabled: Bool {
         get { defaults.object(forKey: "enabled") as? Bool ?? true }
@@ -325,6 +440,8 @@ final class Controller: NSObject, NSMenuDelegate {
         if let raw = UserDefaults(suiteName: dockBundleID)?.string(forKey: "orientation"), DockEdge(rawValue: raw) == nil {
             ErrorLog.record("unknownDockOrientation", "The Dock's orientation setting is \"\(raw)\".")
         }
+        lightMode = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) != .darkAqua
+        if lightMode { wallpaper.reload() }
         iconColor = veilColor(opacityKey: "opacity", fallback: 0.55)
         dotColor = veilColor(opacityKey: "dotOpacity", fallback: 0.7)
         let hiddenPaths = Set(hidden.compactMap { $0.bundleURL.map(DockAX.normalize) })
@@ -380,8 +497,10 @@ final class Controller: NSObject, NSMenuDelegate {
         for tile in hiddenTiles {
             let window = windows[tile.path] ?? VeilWindow()
             windows[tile.path] = window
-            window.apply(VeilGeometry(tile: tile.frame, edge: edge, badge: tile.badge),
-                         primaryHeight: primaryHeight, iconColor: iconColor, dotColor: dotColor)
+            let g = VeilGeometry(tile: tile.frame, edge: edge, badge: tile.badge)
+            // The dot sits on the Dock's glass a few points from the icon, so sample a little around it.
+            window.apply(g, primaryHeight: primaryHeight, iconColor: tone(under: g.icon, fallback: iconColor),
+                         dotColor: tone(under: g.dot.insetBy(dx: -4, dy: -4), fallback: dotColor))
             if !window.isVisible { window.orderFrontRegardless() }
             shown.insert(tile.path)
         }
@@ -502,9 +621,14 @@ final class Controller: NSObject, NSMenuDelegate {
     }
 
     private func veilColor(opacityKey: String, fallback: Double) -> NSColor {
-        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let alpha = CGFloat(defaults.object(forKey: opacityKey) as? Double ?? fallback)
-        return dark ? NSColor(white: 0.13, alpha: alpha) : NSColor(white: 0.93, alpha: alpha)
+        // In Light Mode this is only used when the wallpaper can't be read; mid gray is the least wrong guess.
+        return lightMode ? NSColor(white: 0.5, alpha: alpha) : NSColor(white: 0.13, alpha: alpha)
+    }
+
+    private func tone(under rect: CGRect, fallback: NSColor) -> NSColor {
+        guard lightMode, let color = wallpaper.glassColor(under: rect) else { return fallback }
+        return color.withAlphaComponent(fallback.alphaComponent)
     }
 
     private func registerLoginItemOnFirstLaunch() {
