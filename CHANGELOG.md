@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1
+
+- Retries when the Dock's accessibility list is temporarily unavailable, so dimming recovers without another app event. Only logs a missing Dock list after more than three seconds of continuous failure.
+
 ## 1.2.0
 
 - Adds a Dimming Strength submenu with Light, Medium, and Strong presets that apply immediately. Custom opacity values remain unchanged until a preset is selected.
