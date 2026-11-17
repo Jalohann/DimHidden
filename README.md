@@ -52,7 +52,9 @@ To report a bug or ask for a feature, choose Report a Problem… or Request a Fe
 
 ## Settings
 
-The veil's strength can be adjusted from Terminal. Changes take effect within a few seconds.
+Choose **Dimming Strength** in the menu to apply Light, Medium (the default), or Strong dimming immediately. This changes both the icon and running-indicator dot veils.
+
+You can still set custom strengths from Terminal. Custom values show no preset checkmark unless they match a preset, and stay in effect until you choose one. Terminal changes take effect within a few seconds.
 
 ```sh
 defaults write com.johann.DimHidden opacity -float 0.55     # icon veil, 0 to 1
