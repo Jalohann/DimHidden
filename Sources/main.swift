@@ -4,6 +4,11 @@ import ServiceManagement
 
 private let dockBundleID = "com.apple.dock"
 private let defaults = UserDefaults.standard
+private let dimmingStrengths: [(title: String, icon: Double, dot: Double)] = [
+    ("Light", 0.4, 0.55),
+    ("Medium", 0.55, 0.7),
+    ("Strong", 0.7, 0.85),
+]
 
 // MARK: - Reading the Dock
 
@@ -671,6 +676,20 @@ final class Controller: NSObject, NSMenuDelegate {
         toggle.state = enabled ? .on : .off
         menu.addItem(toggle)
 
+        let strengthMenu = NSMenu(title: "Dimming Strength")
+        let iconOpacity = defaults.object(forKey: "opacity") as? Double ?? 0.55
+        let dotOpacity = defaults.object(forKey: "dotOpacity") as? Double ?? 0.7
+        for (index, strength) in dimmingStrengths.enumerated() {
+            let item = NSMenuItem(title: strength.title, action: #selector(setDimmingStrength(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            item.state = iconOpacity == strength.icon && dotOpacity == strength.dot ? .on : .off
+            strengthMenu.addItem(item)
+        }
+        let strengthItem = NSMenuItem(title: "Dimming Strength", action: nil, keyEquivalent: "")
+        strengthItem.submenu = strengthMenu
+        menu.addItem(strengthItem)
+
         let login = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -698,6 +717,14 @@ final class Controller: NSObject, NSMenuDelegate {
 
     @objc private func toggleEnabled() {
         enabled.toggle()
+        refresh()
+    }
+
+    @objc private func setDimmingStrength(_ sender: NSMenuItem) {
+        guard dimmingStrengths.indices.contains(sender.tag) else { return }
+        let strength = dimmingStrengths[sender.tag]
+        defaults.set(strength.icon, forKey: "opacity")
+        defaults.set(strength.dot, forKey: "dotOpacity")
         refresh()
     }
 
