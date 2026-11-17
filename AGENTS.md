@@ -37,6 +37,8 @@ The safety check rejects anything else, so stay inside these limits:
 - Keep a pull request under 600 changed lines.
 - Bump `CFBundleShortVersionString` (patch for fixes, minor for features) and `CFBundleVersion` (+1), and add a `CHANGELOG.md` section for the new version.
 
+The fixer bot follows `.github/fixer/playbook.md`.
+
 ## Code style
 
 - Match the surrounding code: small types, `private` by default, comments only for why (measured constants, Dock quirks), not what.

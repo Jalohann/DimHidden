@@ -1,0 +1,30 @@
+# Turns the fixer bot's status markers into labels. The bot can't label issues itself: it has no write access to this
+# repository, on purpose.
+name: Fixer labels
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  label:
+    if: github.event.comment.user.login == 'dimhidden-bot' && !github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          state=$(printf '%s' "$BODY" | grep -oE '<!-- dimhidden-fixer: (working|done|needs-human) -->' | tail -n 1 | sed -E 's/.*: ([a-z-]+) -->/\1/' || true)
+          [ -n "$state" ] || exit 0
+          for s in working done needs-human; do
+            [ "$s" = "$state" ] || gh issue edit "$NUMBER" --remove-label "droid:$s" 2>/dev/null || true
+          done
+          gh issue edit "$NUMBER" --add-label "droid:$state"
