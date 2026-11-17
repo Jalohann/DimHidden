@@ -66,7 +66,7 @@ Keep comments short and friendly, and sign nothing: your account name says who y
 10. Open the pull request:
     `gh pr create -R Jalohann/DimHidden --head dimhidden-bot:fix/issue-N --base main --title "<what changed>" --body "<body>"`.
     The body says `Fixes #N`, what you changed and why, what you couldn't verify (you never see the real Dock), and anything the maintainer should check by hand.
-11. Wait for checks with `gh pr checks <PR> -R Jalohann/DimHidden --watch --fail-fast` (up to 20 minutes). If `build` fails, read the log (`gh run view <run> -R Jalohann/DimHidden --log-failed`), fix, and push again, at most three times. If the checks wait for approval because this is a first-time contribution, don't wait; say so in your summary.
+11. Wait for checks with `gh pr checks <PR> -R Jalohann/DimHidden --watch --fail-fast` (up to 20 minutes). If `build` fails, read the log (`gh run view <run> -R Jalohann/DimHidden --log-failed`), fix, and push again, at most three times. A `build` that was cancelled before any step ran means GitHub had no macOS runner free; a workflow retries it, so don't change code for it. If the checks wait for approval because this is a first-time contribution, don't wait; say so in your summary.
 12. Comment on the issue with a link to the pull request (`done` marker). It ships automatically once it passes the safety check, the independent review, and the macOS build.
 
 Never fight the gate. If the Review workflow labels your pull request `droid:needs-human`, leave it for the maintainer.

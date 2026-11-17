@@ -1,0 +1,29 @@
+name: Retry stalled builds
+
+# GitHub sometimes cancels macOS jobs that waited 15 minutes without getting a runner. That isn't a code failure, so
+# rerun those jobs once instead of leaving a pull request unmerged or a release unpublished.
+on:
+  workflow_run:
+    workflows: [CI, Release]
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    if: github.event.workflow_run.conclusion == 'cancelled' && github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Rerun jobs that never got a runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          stalled=$(gh api "repos/$REPO/actions/runs/$RUN/jobs" \
+            --jq '[.jobs[] | select(.conclusion == "cancelled" and ((.runner_name // "") == "") and (.steps | length) == 0)] | length')
+          echo "Jobs cancelled before a runner picked them up: $stalled"
+          [ "$stalled" -gt 0 ] || exit 0
+          gh run rerun "$RUN" --failed -R "$REPO"
