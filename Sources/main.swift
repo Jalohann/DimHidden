@@ -369,6 +369,7 @@ final class Controller: NSObject, NSMenuDelegate {
     private var lastFullRefresh = Date.distantPast
     private var settledFrames = 0
     private var missingTilesSince: Date?
+    private var missingDockListSince: Date?
     // Read once per full refresh; the display-frame path must stay cheap.
     private var edge = DockEdge.bottom
     private var iconColor = NSColor.clear
@@ -427,19 +428,28 @@ final class Controller: NSObject, NSMenuDelegate {
         lastFullRefresh = Date()
 
         let trusted = AXIsProcessTrusted()
-        let list = trusted && enabled && !hidden.isEmpty ? DockAX.list() : nil
+        let needsDock = trusted && enabled && !hidden.isEmpty
+        let list = needsDock ? DockAX.list() : nil
         guard let list else {
-            if trusted && enabled && !hidden.isEmpty {
-                ErrorLog.record("dockListUnavailable", "Accessibility is allowed, but the Dock's icon list could not be read.")
+            if needsDock {
+                // The Dock can briefly lose its accessibility tree while starting or rearranging.
+                let since = missingDockListSince ?? Date()
+                missingDockListSince = since
+                if Date().timeIntervalSince(since) > 3 {
+                    ErrorLog.record("dockListUnavailable", "Accessibility is allowed, but the Dock's icon list could not be read.")
+                }
+            } else {
+                missingDockListSince = nil
             }
             hiddenTiles = []
             dockList = nil
             missingTilesSince = nil
             draw()
             setTracking(false)
-            scheduleIdle(after: trusted ? nil : 2)
+            scheduleIdle(after: needsDock ? 0.5 : (trusted ? nil : 2))
             return
         }
+        missingDockListSince = nil
 
         edge = DockEdge.current
         if let raw = UserDefaults(suiteName: dockBundleID)?.string(forKey: "orientation"), DockEdge(rawValue: raw) == nil {
@@ -590,7 +600,7 @@ final class Controller: NSObject, NSMenuDelegate {
     /// Badges, Dock position, and icon size change without any notification, so check the hidden tiles twice a
     /// second. Re-read the whole Dock every few seconds as a safety net for anything else that rearranges it.
     private func idleTick() {
-        if !AXIsProcessTrusted() || Date().timeIntervalSince(lastFullRefresh) > 5 {
+        if dockList == nil || !AXIsProcessTrusted() || Date().timeIntervalSince(lastFullRefresh) > 5 {
             refresh()
             return
         }
