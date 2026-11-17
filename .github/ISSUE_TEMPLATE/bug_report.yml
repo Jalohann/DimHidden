@@ -1,0 +1,28 @@
+name: Bug report
+description: Something about DimHidden doesn't work or looks wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include a screenshot of the Dock if the dimming looks wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Hide an app with ⌘H
+        2. ...
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Report a Problem in the DimHidden menu fills this in. Otherwise, add your DimHidden and macOS versions and your Dock settings.
+      render: text

@@ -1,0 +1,14 @@
+name: Feature request
+description: Suggest something DimHidden should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like DimHidden to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help?

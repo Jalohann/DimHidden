@@ -1,0 +1,172 @@
+# Gate for every pull request. Nothing here runs code from the pull request: the checks and the review prompt come
+# from main, and the pull request is only read with git. Only this workflow, not the agent that wrote the change, can
+# enable auto-merge, and only for the exact commit that passed both checks.
+name: Review
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PR: ${{ github.event.pull_request.number }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.check.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch the pull request
+        run: |
+          git fetch --no-tags origin "+refs/pull/$PR/head:refs/remotes/pr/head"
+          test "$(git rev-parse refs/remotes/pr/head)" = "$HEAD_SHA" || { echo "The pull request changed during the run." >&2; exit 1; }
+
+      - name: Safety check
+        id: check
+        run: |
+          if python3 .github/scripts/safety_check.py "$BASE_SHA" "$HEAD_SHA" > safety.md; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+          cat safety.md >> "$GITHUB_STEP_SUMMARY"
+
+  ai-review:
+    needs: safety
+    # Only changes from the maintainer or the fixer bot's fork get an automatic review. Anything else needs a human.
+    if: >-
+      needs.safety.outputs.passed == 'true' &&
+      github.event.pull_request.draft == false &&
+      (github.event.pull_request.head.repo.full_name == github.repository ||
+       (vars.BOT_FORK != '' && github.event.pull_request.head.repo.full_name == vars.BOT_FORK))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+      categories: ${{ steps.review.outputs.categories }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch the pull request
+        run: |
+          git fetch --no-tags origin "+refs/pull/$PR/head:refs/remotes/pr/head"
+          test "$(git rev-parse refs/remotes/pr/head)" = "$HEAD_SHA" || { echo "The pull request changed during the run." >&2; exit 1; }
+
+      - name: Prepare the change for review
+        run: |
+          base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          dir=/tmp/review
+          mkdir -p "$dir/before" "$dir/after"
+          git diff --no-ext-diff --no-textconv --no-renames "$base" "$HEAD_SHA" > "$dir/changes.diff"
+          git diff --no-ext-diff --no-textconv --no-renames --name-only --diff-filter=d "$base" "$HEAD_SHA" -- 'Sources/*.swift' 'Info.plist' |
+            while IFS= read -r f; do mkdir -p "$dir/after/$(dirname "$f")"; git show "$HEAD_SHA:$f" > "$dir/after/$f"; done
+          git diff --no-ext-diff --no-textconv --no-renames --name-only --diff-filter=D "$base" "$HEAD_SHA" -- 'Sources/*.swift' |
+            while IFS= read -r f; do echo "deleted: $f" >> "$dir/deleted.txt"; done
+          git diff --no-ext-diff --no-textconv --no-renames --name-only --diff-filter=dA "$base" "$HEAD_SHA" -- 'Sources/*.swift' 'Info.plist' |
+            while IFS= read -r f; do mkdir -p "$dir/before/$(dirname "$f")"; git show "$base:$f" > "$dir/before/$f"; done
+          cp .github/review/prompt.md /tmp/review-prompt.md
+
+      - name: Install Droid
+        run: curl -fsSL https://app.factory.ai/cli | sh
+
+      # The reviewer can only read files: no shell, no web, no tokens besides the Factory key. Its free-text answer is
+      # never printed or posted, so text planted in the change can't use it to publish anything. Only the verdict and
+      # categories, checked against fixed lists, leave this step.
+      - name: Independent review
+        id: review
+        env:
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+        run: |
+          verdict=""
+          categories=""
+          if [ -n "$FACTORY_API_KEY" ] && ~/.local/bin/droid exec -m claude-opus-5-5 -r high \
+              --only-tools Read,Grep,Glob,LS --disable-builtin-skills --cwd /tmp/review \
+              -o json -f /tmp/review-prompt.md > /tmp/review-result.json 2>/dev/null; then
+            text=$(jq -r 'select(.is_error == false) | .result // ""' /tmp/review-result.json)
+            last=$(printf '%s\n' "$text" | sed '/^[[:space:]]*$/d' | tail -n 2)
+            line1=$(printf '%s\n' "$last" | sed -n 1p)
+            line2=$(printf '%s\n' "$last" | sed -n 2p)
+            case "$line1" in
+              "VERDICT: APPROVE") verdict=APPROVE ;;
+              "VERDICT: REJECT") verdict=REJECT ;;
+            esac
+            allowed=" none network process files input-capture credentials settings persistence runtime-code obfuscation privacy unrelated breakage injection other "
+            for c in $(printf '%s' "${line2#CATEGORIES: }" | tr ',' ' '); do
+              case "$allowed" in *" $c "*) categories="$categories${categories:+, }$c" ;; esac
+            done
+            session=$(jq -r '.session_id // ""' /tmp/review-result.json | tr -cd 'a-f0-9-')
+            echo "Review session: \`$session\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          [ -n "$verdict" ] || verdict=ERROR
+          echo "Verdict: $verdict ($categories)" >> "$GITHUB_STEP_SUMMARY"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "categories=$categories" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: [safety, ai-review]
+    if: needs.ai-review.outputs.verdict == 'APPROVE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable auto-merge for the reviewed commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh pr edit "$PR" --remove-label droid:needs-human || true
+          gh pr merge "$PR" --auto --squash --match-head-commit "$HEAD_SHA"
+          gh pr comment "$PR" --body "Passed the safety check and the independent review (commit $HEAD_SHA). It merges once the macOS build passes."
+
+  flag:
+    needs: [safety, ai-review]
+    if: always() && needs.ai-review.outputs.verdict != 'APPROVE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Ask for a human review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SAFETY: ${{ needs.safety.outputs.passed }}
+          VERDICT: ${{ needs.ai-review.outputs.verdict }}
+          CATEGORIES: ${{ needs.ai-review.outputs.categories }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$SAFETY" != "true" ]; then
+            reason="it didn't pass the safety check"
+          elif [ -z "$VERDICT" ]; then
+            reason="it comes from outside this repository and the fixer bot, so it gets no automatic review"
+          elif [ "$VERDICT" = "REJECT" ]; then
+            reason="the independent review rejected it (${CATEGORIES:-no categories given})"
+          else
+            reason="the independent review didn't finish"
+          fi
+          gh pr edit "$PR" --add-label droid:needs-human
+          gh pr comment "$PR" --body "This pull request needs a human review because $reason. Details: $RUN_URL"

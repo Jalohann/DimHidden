@@ -71,8 +71,42 @@ enum DockAX {
     }
 }
 
-// MARK: - Geometry
+// MARK: - Error log
 
+private let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+private let osVersion = ProcessInfo.processInfo.operatingSystemVersionString
+
+/// Problems worth fixing go to ~/Library/Logs/DimHidden/errors.log as JSON lines. The updater turns new entries into
+/// GitHub issues, and Report a Problem includes the latest ones. Never put app names or other personal details here:
+/// entries can end up in public issues.
+@MainActor
+enum ErrorLog {
+    static let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/DimHidden/errors.log")
+    private static let maxSize = 256_000
+    private static var recorded = Set<String>()
+
+    /// Appends an entry, at most once per launch for each kind and message.
+    static func record(_ kind: String, _ message: String) {
+        guard recorded.insert(kind + "\u{0}" + message).inserted else { return }
+        let entry = ["time": ISO8601DateFormatter().string(from: Date()), "kind": kind, "message": message,
+                     "version": appVersion, "macOS": osVersion]
+        guard var line = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else { return }
+        line.append(0x0A)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var data = (try? Data(contentsOf: url)) ?? Data()
+        data.append(line)
+        if data.count > maxSize { data = data.suffix(maxSize / 2) }  // may cut the oldest kept line; readers skip it
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func recent(_ count: Int) -> [String] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return Array(text.split(separator: "\n").suffix(count).map(String.init))
+    }
+}
+
+// MARK: - Geometry
 enum DockEdge: String {
     case bottom, left, right
 
@@ -216,6 +250,7 @@ final class Controller: NSObject, NSMenuDelegate {
     private var mouseMonitor: Any?
     private var lastFullRefresh = Date.distantPast
     private var settledFrames = 0
+    private var missingTilesSince: Date?
     // Read once per full refresh; the display-frame path must stay cheap.
     private var edge = DockEdge.bottom
     private var iconColor = NSColor.clear
@@ -271,16 +306,25 @@ final class Controller: NSObject, NSMenuDelegate {
         statusItem.button?.title = hidden.isEmpty ? "" : " \(hidden.count)"
         lastFullRefresh = Date()
 
-        guard AXIsProcessTrusted(), enabled, !hidden.isEmpty, let list = DockAX.list() else {
+        let trusted = AXIsProcessTrusted()
+        let list = trusted && enabled && !hidden.isEmpty ? DockAX.list() : nil
+        guard let list else {
+            if trusted && enabled && !hidden.isEmpty {
+                ErrorLog.record("dockListUnavailable", "Accessibility is allowed, but the Dock's icon list could not be read.")
+            }
             hiddenTiles = []
             dockList = nil
+            missingTilesSince = nil
             draw()
             setTracking(false)
-            scheduleIdle(after: AXIsProcessTrusted() ? nil : 2)
+            scheduleIdle(after: trusted ? nil : 2)
             return
         }
 
         edge = DockEdge.current
+        if let raw = UserDefaults(suiteName: dockBundleID)?.string(forKey: "orientation"), DockEdge(rawValue: raw) == nil {
+            ErrorLog.record("unknownDockOrientation", "The Dock's orientation setting is \"\(raw)\".")
+        }
         iconColor = veilColor(opacityKey: "opacity", fallback: 0.55)
         dotColor = veilColor(opacityKey: "dotOpacity", fallback: 0.7)
         let hiddenPaths = Set(hidden.compactMap { $0.bundleURL.map(DockAX.normalize) })
@@ -289,6 +333,7 @@ final class Controller: NSObject, NSMenuDelegate {
         hiddenTiles = DockAX.appTiles(in: list).filter {
             hiddenPaths.contains($0.path) || bundleID(for: $0.path).map(hiddenIDs.contains) == true
         }
+        checkTiles(hiddenCount: hidden.count)
         updateHoverZone()
         draw()
         setTracking(true)
@@ -296,6 +341,23 @@ final class Controller: NSObject, NSMenuDelegate {
         scheduleIdle(after: 0.5)
     }
 
+    /// Logs hidden apps whose Dock tile can't be found, and tiles with implausible frames. The Dock briefly lacks a
+    /// tile while an app launches, so a missing tile only counts once it has been missing for a few seconds.
+    private func checkTiles(hiddenCount: Int) {
+        let missing = hiddenCount - hiddenTiles.count
+        if missing > 0 {
+            let since = missingTilesSince ?? Date()
+            missingTilesSince = since
+            if Date().timeIntervalSince(since) > 3 {
+                ErrorLog.record("hiddenAppTileMissing", "\(missing) of \(hiddenCount) hidden apps had no matching Dock tile.")
+            }
+        } else {
+            missingTilesSince = nil
+        }
+        for tile in hiddenTiles where tile.frame.width < 8 || tile.frame.height < 8 || tile.frame.width > 1024 || tile.frame.height > 1024 {
+            ErrorLog.record("unexpectedTileFrame", "A Dock tile reported the frame \(tile.frame).")
+        }
+    }
     /// Re-reads only the hidden tiles' frames. Cheap enough to run every display frame.
     private func updateFrames() -> Bool {
         var moved = false
@@ -448,7 +510,11 @@ final class Controller: NSObject, NSMenuDelegate {
     private func registerLoginItemOnFirstLaunch() {
         guard !defaults.bool(forKey: "loginItemConfigured") else { return }
         defaults.set(true, forKey: "loginItemConfigured")
-        try? SMAppService.mainApp.register()
+        do {
+            try SMAppService.mainApp.register()
+        } catch {
+            ErrorLog.record("loginItemRegistration", error.localizedDescription)
+        }
     }
 
     // MARK: Menu
@@ -487,9 +553,19 @@ final class Controller: NSObject, NSMenuDelegate {
         menu.addItem(login)
 
         menu.addItem(.separator())
+        let report = NSMenuItem(title: "Report a Problem…", action: #selector(reportProblem), keyEquivalent: "")
+        report.target = self
+        menu.addItem(report)
+        let request = NSMenuItem(title: "Request a Feature…", action: #selector(requestFeature), keyEquivalent: "")
+        request.target = self
+        menu.addItem(request)
+
+        menu.addItem(.separator())
+        let version = NSMenuItem(title: "DimHidden \(appVersion)", action: nil, keyEquivalent: "")
+        version.isEnabled = false
+        menu.addItem(version)
         menu.addItem(withTitle: "Quit DimHidden", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     }
-
     @objc private func unhide(_ sender: NSMenuItem) {
         guard let app = sender.representedObject as? NSRunningApplication else { return }
         app.unhide()
@@ -506,6 +582,7 @@ final class Controller: NSObject, NSMenuDelegate {
         do {
             if service.status == .enabled { try service.unregister() } else { try service.register() }
         } catch {
+            ErrorLog.record("loginItemToggle", error.localizedDescription)
             SMAppService.openSystemSettingsLoginItems()
         }
     }
@@ -513,8 +590,49 @@ final class Controller: NSObject, NSMenuDelegate {
     @objc private func openAccessibility() {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
-}
 
+    @objc private func reportProblem() {
+        openIssueForm("bug_report.yml", fields: ["environment": diagnostics()])
+    }
+
+    @objc private func requestFeature() {
+        openIssueForm("feature_request.yml", fields: [:])
+    }
+
+    /// Opens a new GitHub issue with the given issue form, pre-filling form fields by their ids.
+    private func openIssueForm(_ template: String, fields: [String: String]) {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        let query = (["template": template].merging(fields) { a, _ in a })
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")" }
+            .joined(separator: "&")
+        if let url = URL(string: "https://github.com/Jalohann/DimHidden/issues/new?" + query) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Settings that affect where the veils go. No app names: this text is posted publicly.
+    private func diagnostics() -> String {
+        let dock = UserDefaults(suiteName: dockBundleID)
+        let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let magnification = dock?.bool(forKey: "magnification") == true
+            ? "on (\(Int(dock?.double(forKey: "largesize") ?? 0)))" : "off"
+        var lines = [
+            "DimHidden \(appVersion)",
+            "macOS \(osVersion)",
+            "Dock: \(DockEdge.current.rawValue), icon size \(Int(dock?.double(forKey: "tilesize") ?? 0)), "
+                + "magnification \(magnification), auto-hide \(dock?.bool(forKey: "autohide") == true ? "on" : "off")",
+            "Appearance: \(dark ? "Dark" : "Light")",
+            "Displays: \(NSScreen.screens.count)",
+            "Accessibility: \(AXIsProcessTrusted() ? "allowed" : "not allowed")",
+            "Hidden apps: \(hiddenApps().count), tiles found: \(hiddenTiles.count)",
+        ]
+        let errors = ErrorLog.recent(10)
+        if !errors.isEmpty { lines += ["", "Recent errors:"] + errors }
+        return lines.joined(separator: "\n")
+    }
+}
 private extension CGFloat {
     func nonZero(or fallback: CGFloat) -> CGFloat { self > 0 ? self : fallback }
 }

@@ -46,6 +46,8 @@ SIGN_IDENTITY="My Signing Cert" ./build.sh
 
 Hide apps the usual way, with ⌘H or Hide in the app menu. The menu bar icon shows how many apps are hidden. Its menu lists them (click one to show it again) and has switches for the dimming and for opening at login.
 
+To report a bug or ask for a feature, choose Report a Problem… or Request a Feature… from the menu. Report a Problem fills in your DimHidden and macOS versions, your Dock settings, and recent errors from `~/Library/Logs/DimHidden/errors.log`. It never includes app names.
+
 <img src="docs/menu.png" alt="The DimHidden menu, listing four hidden apps" width="340">
 
 ## Settings
@@ -68,6 +70,16 @@ The Dock doesn't report where it draws the artwork, dot, and badge inside each t
 - Tested on macOS 27.2 in Dark Mode with the default icon style. A future macOS update could move things by a point or two.
 - Not tested with Dock auto-hide or with more than one display.
 - If you hide an app in another Space, its veil can show up there too.
+
+## How fixes ship
+
+New issues are picked up by an automated agent that writes a fix or the requested feature and opens a pull request. Before anything merges, each pull request has to pass:
+
+1. A deterministic safety check (`.github/scripts/safety_check.py`). It limits which files can change and blocks code that uses the network, launches processes, captures input, touches credentials, or deletes files.
+2. An independent AI review that sees only the code change, never the issue, and can only read files.
+3. The macOS build in CI, including a launch test.
+
+Anything that fails a check waits for a human. Releases are built by GitHub Actions from `main`. See [AGENTS.md](AGENTS.md) for details.
 
 ## Uninstall
 

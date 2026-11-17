@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  safety-check-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: .github/scripts/test_safety_check.sh
+
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: SIGN_IDENTITY=- ./build.sh --no-install
+
+      - name: Check the bundle
+        run: |
+          bin=build/DimHidden.app/Contents/MacOS/DimHidden
+          archs=$(lipo -archs "$bin")
+          echo "Architectures: $archs"
+          case "$archs" in *arm64*) ;; *) echo "missing arm64" >&2; exit 1 ;; esac
+          case "$archs" in *x86_64*) ;; *) echo "missing x86_64" >&2; exit 1 ;; esac
+          plutil -lint build/DimHidden.app/Contents/Info.plist
+          codesign --verify build/DimHidden.app
+
+      - name: Launch smoke test
+        run: |
+          build/DimHidden.app/Contents/MacOS/DimHidden &
+          pid=$!
+          sleep 8
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "DimHidden exited within 8 seconds of launch" >&2
+            wait "$pid" || true
+            exit 1
+          fi
+          kill "$pid"
